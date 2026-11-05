@@ -25,6 +25,10 @@
 
 #include <net/if.h>
 #include <linux/netlink.h>
+#include <sys/ioctl.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <android-base/logging.h>
 
@@ -45,6 +49,23 @@ namespace android {
 namespace wificond {
 
 namespace {
+
+// kernels before 3.4 do not report NL80211_ATTR_MAC in interface dumps
+bool GetHwAddr(const string& if_name, array<uint8_t, ETH_ALEN>* mac) {
+  int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (sock < 0) {
+    return false;
+  }
+  struct ifreq ifr = {};
+  strlcpy(ifr.ifr_name, if_name.c_str(), sizeof(ifr.ifr_name));
+  bool ok = ioctl(sock, SIOCGIFHWADDR, &ifr) == 0;
+  close(sock);
+  if (ok) {
+    std::copy_n(reinterpret_cast<uint8_t*>(ifr.ifr_hwaddr.sa_data), ETH_ALEN,
+                mac->begin());
+  }
+  return ok;
+}
 
 uint32_t k2GHzFrequencyLowerBound = 2400;
 uint32_t k2GHzFrequencyUpperBound = 2500;
@@ -217,7 +238,8 @@ bool NetlinkUtils::GetInterfaces(uint32_t wiphy_index,
     }
 
     array<uint8_t, ETH_ALEN> if_mac_addr;
-    if (!packet->GetAttributeValue(NL80211_ATTR_MAC, &if_mac_addr)) {
+    if (!packet->GetAttributeValue(NL80211_ATTR_MAC, &if_mac_addr) &&
+        !GetHwAddr(if_name, &if_mac_addr)) {
       LOG(WARNING) << "Failed to get interface mac address";
       continue;
     }
@@ -342,11 +364,11 @@ bool NetlinkUtils::ParseWiphyInfoFromPacket(
       !ParseScanCapabilities(&packet, out_scan_capabilities)) {
     return false;
   }
-  uint32_t feature_flags;
+  // kernels before 3.4 do not report NL80211_ATTR_FEATURE_FLAGS: no features
+  uint32_t feature_flags = 0;
   if (!packet.GetAttributeValue(NL80211_ATTR_FEATURE_FLAGS,
                                  &feature_flags)) {
-    LOG(ERROR) << "Failed to get NL80211_ATTR_FEATURE_FLAGS";
-    return false;
+    LOG(WARNING) << "Failed to get NL80211_ATTR_FEATURE_FLAGS";
   }
   std::vector<uint8_t> ext_feature_flags_bytes;
   if (!packet.GetAttributeValue(NL80211_ATTR_EXT_FEATURES,

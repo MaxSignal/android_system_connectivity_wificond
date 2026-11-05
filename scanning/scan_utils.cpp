@@ -20,6 +20,8 @@
 #include <array>
 #include <vector>
 
+#include <time.h>
+
 #include <linux/netlink.h>
 #include <linux/if_ether.h>
 
@@ -207,8 +209,19 @@ bool ScanUtils::GetBssTimestamp(const NL80211NestedAttr& bss,
     // Fall back to use TSF if we can't find NL80211_BSS_LAST_SEEN_BOOTTIME
     // attribute.
     if (!bss.GetAttributeValue(NL80211_BSS_TSF, last_seen_since_boot_microseconds)) {
-      LOG(ERROR) << "Failed to get TSF from scan result packet";
-      return false;
+      // kernels before 3.11 omit a zero TSF (bcmdhd always reports zero):
+      // derive the boot time from how long ago the BSS was seen
+      uint32_t seen_ms_ago;
+      if (!bss.GetAttributeValue(NL80211_BSS_SEEN_MS_AGO, &seen_ms_ago)) {
+        LOG(ERROR) << "Failed to get TSF from scan result packet";
+        return false;
+      }
+      struct timespec now;
+      clock_gettime(CLOCK_BOOTTIME, &now);
+      uint64_t now_microseconds = static_cast<uint64_t>(now.tv_sec) * 1000000 +
+                                  now.tv_nsec / 1000;
+      *last_seen_since_boot_microseconds =
+          now_microseconds - static_cast<uint64_t>(seen_ms_ago) * 1000;
     }
     uint64_t beacon_tsf_microseconds;
     if (bss.GetAttributeValue(NL80211_BSS_BEACON_TSF, &beacon_tsf_microseconds)) {
